@@ -3,6 +3,7 @@ using UserManagement.Domain.Entities;
 
 namespace UserManagement.Infrastructure.Data;
 
+//Db context for User Management Microservice
 public class UserManagementDbContext : DbContext
 {
     public UserManagementDbContext(DbContextOptions<UserManagementDbContext> options) : base(options)
