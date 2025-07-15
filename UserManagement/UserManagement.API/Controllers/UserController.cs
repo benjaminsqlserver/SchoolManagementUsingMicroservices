@@ -1,4 +1,10 @@
-﻿using Microsoft.AspNetCore.Mvc;
+﻿
+// ================================
+// 4. Updated Controller
+// ================================
+
+// UserManagement/UserManagement.API/Controllers/UserController.cs
+using Microsoft.AspNetCore.Mvc;
 using UserManagement.Application.DTOs;
 using UserManagement.Application.Interfaces;
 using UserManagement.Domain.Entities;
@@ -67,6 +73,34 @@ public class UserController : ControllerBase
     }
 
     [HttpGet]
+    public async Task<IActionResult> GetUsers([FromQuery] UserQueryDto queryDto)
+    {
+        if (!ModelState.IsValid)
+        {
+            return BadRequest(ModelState);
+        }
+
+        try
+        {
+            var result = await _userService.GetUsersAsync(queryDto);
+
+            // Add pagination metadata to response headers
+            Response.Headers.Add("X-Pagination-TotalCount", result.TotalCount.ToString());
+            Response.Headers.Add("X-Pagination-TotalPages", result.TotalPages.ToString());
+            Response.Headers.Add("X-Pagination-CurrentPage", result.Page.ToString());
+            Response.Headers.Add("X-Pagination-PageSize", result.PageSize.ToString());
+            Response.Headers.Add("X-Pagination-HasPrevious", result.HasPreviousPage.ToString());
+            Response.Headers.Add("X-Pagination-HasNext", result.HasNextPage.ToString());
+
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(new { Message = ex.Message });
+        }
+    }
+
+    [HttpGet("all")]
     public async Task<IActionResult> GetAllUsers()
     {
         var users = await _userService.GetAllUsersAsync();
