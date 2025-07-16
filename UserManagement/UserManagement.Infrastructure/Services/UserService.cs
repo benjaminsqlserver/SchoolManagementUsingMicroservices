@@ -4,120 +4,206 @@
 // ================================
 
 // UserManagement/UserManagement.Infrastructure/Services/UserService.cs
+using BCrypt.Net;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using System.Linq.Expressions;
 using UserManagement.Application.DTOs;
+using UserManagement.Application.Exceptions;
 using UserManagement.Application.Interfaces;
 using UserManagement.Domain.Entities;
 using UserManagement.Infrastructure.Data;
-using BCrypt.Net;
-using System.Linq.Expressions;
 
 namespace UserManagement.Infrastructure.Services;
 
 public class UserService : IUserService
 {
     private readonly UserManagementDbContext _context;
+    private readonly ILogger<UserService> _logger;
 
-    public UserService(UserManagementDbContext context)
+    public UserService(UserManagementDbContext context, ILogger<UserService> logger)
     {
         _context = context;
+        _logger = logger;
     }
 
     public async Task<UserDetails> CreateUserAsync(UserDetails user, Guid roleId)
     {
-        // Hash password
-        user.Password = BCrypt.Net.BCrypt.HashPassword(user.Password);
-        user.Id = Guid.NewGuid();
-        user.CreatedAt = DateTime.UtcNow;
-        user.UpdatedAt = DateTime.UtcNow;
-
-        _context.UserDetails.Add(user);
-        await _context.SaveChangesAsync();
-
-        // Assign role
-        var userInRole = new UserInRole
+        try
         {
-            UserID = user.Id,
-            RoleID = roleId,
-            AssignedAt = DateTime.UtcNow
-        };
+            // Check if email already exists
+            var existingUser = await _context.UserDetails
+                .FirstOrDefaultAsync(u => u.EmailAddress == user.EmailAddress);
 
-        _context.UserInRoles.Add(userInRole);
-        await _context.SaveChangesAsync();
+            if (existingUser != null)
+            {
+                throw new ConflictException($"A user with email '{user.EmailAddress}' already exists.");
+            }
 
-        return user;
+            // Check if role exists
+            var role = await _context.Roles.FindAsync(roleId);
+            if (role == null)
+            {
+                throw new NotFoundException("Role", roleId);
+            }
+
+            // Hash password
+            user.Password = BCrypt.Net.BCrypt.HashPassword(user.Password);
+            user.Id = Guid.NewGuid();
+            user.CreatedAt = DateTime.UtcNow;
+            user.UpdatedAt = DateTime.UtcNow;
+
+            _context.UserDetails.Add(user);
+            await _context.SaveChangesAsync();
+
+            // Assign role
+            var userInRole = new UserInRole
+            {
+                UserID = user.Id,
+                RoleID = roleId,
+                AssignedAt = DateTime.UtcNow
+            };
+
+            _context.UserInRoles.Add(userInRole);
+            await _context.SaveChangesAsync();
+
+            _logger.LogInformation("User created successfully with ID: {UserId}", user.Id);
+            return user;
+        }
+        catch (Exception ex) when (!(ex is BaseException))
+        {
+            _logger.LogError(ex, "Error creating user with email: {Email}", user.EmailAddress);
+            throw;
+        }
     }
 
     public async Task<UserDetails?> GetUserByIdAsync(Guid id)
     {
-        return await _context.UserDetails
-            .Include(u => u.UserInRoles)
-            .ThenInclude(ur => ur.Role)
-            .FirstOrDefaultAsync(u => u.Id == id);
+        try
+        {
+            var user = await _context.UserDetails
+                .Include(u => u.UserInRoles)
+                .ThenInclude(ur => ur.Role)
+                .FirstOrDefaultAsync(u => u.Id == id);
+
+            if (user == null)
+            {
+                throw new NotFoundException("User", id);
+            }
+
+            return user;
+        }
+        catch (Exception ex) when (!(ex is BaseException))
+        {
+            _logger.LogError(ex, "Error retrieving user with ID: {UserId}", id);
+            throw;
+        }
     }
 
     public async Task<UserDetails?> GetUserByEmailAsync(string email)
     {
-        return await _context.UserDetails
-            .Include(u => u.UserInRoles)
-            .ThenInclude(ur => ur.Role)
-            .FirstOrDefaultAsync(u => u.EmailAddress == email);
+        try
+        {
+            var user = await _context.UserDetails
+                .Include(u => u.UserInRoles)
+                .ThenInclude(ur => ur.Role)
+                .FirstOrDefaultAsync(u => u.EmailAddress == email);
+
+            if (user == null)
+            {
+                throw new NotFoundException($"User with email '{email}' was not found.");
+            }
+
+            return user;
+        }
+        catch (Exception ex) when (!(ex is BaseException))
+        {
+            _logger.LogError(ex, "Error retrieving user with email: {Email}", email);
+            throw;
+        }
     }
 
     public async Task<bool> ValidateUserCredentialsAsync(string email, string password)
     {
-        var user = await _context.UserDetails
-            .FirstOrDefaultAsync(u => u.EmailAddress == email);
+        try
+        {
+            var user = await _context.UserDetails
+                .FirstOrDefaultAsync(u => u.EmailAddress == email);
 
-        if (user == null)
-            return false;
+            if (user == null)
+            {
+                throw new UnauthorizedException("Invalid email or password.");
+            }
 
-        return BCrypt.Net.BCrypt.Verify(password, user.Password);
+            var isValid = BCrypt.Net.BCrypt.Verify(password, user.Password);
+
+            if (!isValid)
+            {
+                throw new UnauthorizedException("Invalid email or password.");
+            }
+
+            return true;
+        }
+        catch (Exception ex) when (!(ex is BaseException))
+        {
+            _logger.LogError(ex, "Error validating credentials for email: {Email}", email);
+            throw;
+        }
     }
+
 
     public async Task<PagedResultDto<UserSummaryDto>> GetUsersAsync(UserQueryDto queryDto)
     {
-        var query = _context.UserDetails
-            .Include(u => u.UserInRoles)
-            .ThenInclude(ur => ur.Role)
-            .AsQueryable();
-
-        // Apply filters
-        query = ApplyFilters(query, queryDto);
-
-        // Get total count before pagination
-        var totalCount = await query.CountAsync();
-
-        // Apply sorting
-        query = ApplySorting(query, queryDto.SortBy, queryDto.SortDirection);
-
-        // Apply pagination
-        var users = await query
-            .Skip((queryDto.Page - 1) * queryDto.PageSize)
-            .Take(queryDto.PageSize)
-            .Select(u => new UserSummaryDto
-            {
-                Id = u.Id,
-                FirstName = u.FirstName,
-                MiddleName = u.MiddleName,
-                LastName = u.LastName,
-                DateOfBirth = u.DateOfBirth,
-                Gender = u.Gender,
-                EmailAddress = u.EmailAddress,
-                PhoneNumber = u.PhoneNumber,
-                RoleName = u.UserInRoles.FirstOrDefault()!.Role.RoleName,
-                CreatedAt = u.CreatedAt
-            })
-            .ToListAsync();
-
-        return new PagedResultDto<UserSummaryDto>
+        try
         {
-            Items = users,
-            TotalCount = totalCount,
-            Page = queryDto.Page,
-            PageSize = queryDto.PageSize
-        };
+            var query = _context.UserDetails
+                .Include(u => u.UserInRoles)
+                .ThenInclude(ur => ur.Role)
+                .AsQueryable();
+
+            // Apply filters
+            query = ApplyFilters(query, queryDto);
+
+            // Get total count before pagination
+            var totalCount = await query.CountAsync();
+
+            // Apply sorting
+            query = ApplySorting(query, queryDto.SortBy, queryDto.SortDirection);
+
+            // Apply pagination
+            var users = await query
+                .Skip((queryDto.Page - 1) * queryDto.PageSize)
+                .Take(queryDto.PageSize)
+                .Select(u => new UserSummaryDto
+                {
+                    Id = u.Id,
+                    FirstName = u.FirstName,
+                    MiddleName = u.MiddleName,
+                    LastName = u.LastName,
+                    DateOfBirth = u.DateOfBirth,
+                    Gender = u.Gender,
+                    EmailAddress = u.EmailAddress,
+                    PhoneNumber = u.PhoneNumber,
+                    RoleName = u.UserInRoles.FirstOrDefault()!.Role.RoleName,
+                    CreatedAt = u.CreatedAt
+                })
+                .ToListAsync();
+
+            return new PagedResultDto<UserSummaryDto>
+            {
+                Items = users,
+                TotalCount = totalCount,
+                Page = queryDto.Page,
+                PageSize = queryDto.PageSize
+            };
+        }
+        catch (Exception ex) when (!(ex is BaseException))
+        {
+            _logger.LogError(ex, "Error retrieving users with query: {@Query}", queryDto);
+            throw;
+        }
     }
+
 
     private IQueryable<UserDetails> ApplyFilters(IQueryable<UserDetails> query, UserQueryDto queryDto)
     {
@@ -221,18 +307,60 @@ public class UserService : IUserService
 
     public async Task UpdateUserAsync(UserDetails user)
     {
-        user.UpdatedAt = DateTime.UtcNow;
-        _context.UserDetails.Update(user);
-        await _context.SaveChangesAsync();
+        try
+        {
+            var existingUser = await _context.UserDetails.FindAsync(user.Id);
+            if (existingUser == null)
+            {
+                throw new NotFoundException("User", user.Id);
+            }
+
+            // Check if email is being changed and if new email already exists
+            if (existingUser.EmailAddress != user.EmailAddress)
+            {
+                var emailExists = await _context.UserDetails
+                    .AnyAsync(u => u.EmailAddress == user.EmailAddress && u.Id != user.Id);
+
+                if (emailExists)
+                {
+                    throw new ConflictException($"A user with email '{user.EmailAddress}' already exists.");
+                }
+            }
+
+            user.UpdatedAt = DateTime.UtcNow;
+            _context.UserDetails.Update(user);
+            await _context.SaveChangesAsync();
+
+            _logger.LogInformation("User updated successfully with ID: {UserId}", user.Id);
+        }
+        catch (Exception ex) when (!(ex is BaseException))
+        {
+            _logger.LogError(ex, "Error updating user with ID: {UserId}", user.Id);
+            throw;
+        }
     }
+
+
 
     public async Task DeleteUserAsync(Guid id)
     {
-        var user = await _context.UserDetails.FindAsync(id);
-        if (user != null)
+        try
         {
+            var user = await _context.UserDetails.FindAsync(id);
+            if (user == null)
+            {
+                throw new NotFoundException("User", id);
+            }
+
             _context.UserDetails.Remove(user);
             await _context.SaveChangesAsync();
+
+            _logger.LogInformation("User deleted successfully with ID: {UserId}", id);
+        }
+        catch (Exception ex) when (!(ex is BaseException))
+        {
+            _logger.LogError(ex, "Error deleting user with ID: {UserId}", id);
+            throw;
         }
     }
 }
